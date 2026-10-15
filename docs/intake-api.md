@@ -5,7 +5,7 @@
 ```
 POST  http://<HOST>/webhook/topic
 Content-Type: application/json
-X-Token: 6eb524ac20dbf1a070e8cae3a403efb8
+X-Token: <你的 WEBHOOK_TOKEN>
 ```
 
 | 场景 | `<HOST>` | 状态 |
@@ -15,7 +15,12 @@ X-Token: 6eb524ac20dbf1a070e8cae3a403efb8
 | 未来域名 + HTTPS | `https://你的域名` | 待配 nginx |
 
 > Token 存在服务器 `/opt/n8n/.env` 的 `WEBHOOK_TOKEN`，同时以加密凭据形式存在 n8n 里。
-> 换 Token：改 `.env` 后重启容器，并到 n8n → Credentials → `Webhook Token` 同步改值。
+>
+> **换 Token（泄露时必做）**：`bash /opt/n8n/tools/rotate_token.sh`
+> 它会自动生成新值、写回 `.env`、删旧凭据、重建凭据并重载 WF1，最后用新/错 Token 各打一次自测。
+> 运行后取新值：`ssh root@175.178.120.171 "grep WEBHOOK_TOKEN /opt/n8n/.env"`
+>
+> ⚠️ **不要把真实 Token 写进文档或提交到仓库** —— 这里一律用 `<你的 WEBHOOK_TOKEN>` 占位。
 
 ## 2. 请求体
 
@@ -79,7 +84,7 @@ POST http://127.0.0.1:5678/webhook/write
 ```
 POST http://127.0.0.1:5678/webhook/topic
 Content-Type: application/json
-X-Token: 6eb524ac20dbf1a070e8cae3a403efb8
+X-Token: <你的 WEBHOOK_TOKEN>
 ```
 
 **请求体（只输出纯 JSON，不要任何寒暄、解释、markdown 代码围栏）**
