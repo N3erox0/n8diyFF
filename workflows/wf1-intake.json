@@ -1,0 +1,181 @@
+{
+  "name": "WF1 选题接收通路",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "topic",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Webhook 收选题",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-620, 300],
+      "webhookId": "topic-intake",
+      "credentials": { "httpHeaderAuth": { "id": "__TOKEN_CRED_ID__", "name": "Webhook Token" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst body = raw.body && Object.keys(raw.body).length ? raw.body : raw;\n\nconst esc = s => String(s ?? '').replace(/'/g, \"''\");\n\nconst title = String(body.title ?? '').trim();\nlet urls = body.source_urls ?? body.urls ?? [];\nif (typeof urls === 'string') urls = urls.split(/[\\n,]/).map(s => s.trim()).filter(Boolean);\nurls = (Array.isArray(urls) ? urls : []).map(u => String(u).trim()).filter(u => /^https?:\\/\\//i.test(u));\n\n// 新格式：sources = [{url, title, content}]，content 为原文正文（必须带，服务器抓不了海外站点）\nlet srcObjs = [];\nif (Array.isArray(body.sources)) {\n  srcObjs = body.sources.map(s => ({\n    url: String(s.url ?? s.link ?? '').trim(),\n    title: String(s.title ?? '').trim(),\n    content: String(s.content ?? s.full_text ?? s.text ?? '').trim()\n  })).filter(s => /^https?:\\/\\//i.test(s.url));\n}\nif (srcObjs.length === 0) srcObjs = urls.map(u => ({ url: u, title: '', content: '' }));\nif (urls.length === 0) urls = srcObjs.map(s => s.url);\n\nconst errors = [];\nif (!title) errors.push('title 必填');\nif (urls.length === 0) errors.push('sources 或 source_urls 至少 1 个 http(s) 链接（事实核查全靠它）');\n\nconst topicId = 'T' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);\n\nconst out = {\n  valid: errors.length === 0,\n  valid_flag: errors.length === 0 ? 'yes' : 'no',\n  errors,\n  topic_id: topicId,\n  title,\n  angle: String(body.angle ?? '').trim(),\n  direction: String(body.direction ?? '').trim(),\n  keywords: Array.isArray(body.keywords) ? body.keywords.join(',') : String(body.keywords ?? '').trim(),\n  brief: String(body.brief ?? body.summary ?? '').trim(),\n  pushed_by: String(body.pushed_by ?? body.source ?? 'manual').trim(),\n  urls,\n  url_count: urls.length,\n  sources: srcObjs,\n  title_s: esc(title),\n  angle_s: esc(body.angle ?? ''),\n  direction_s: esc(body.direction ?? ''),\n  keywords_s: esc(Array.isArray(body.keywords) ? body.keywords.join(',') : (body.keywords ?? '')),\n  brief_s: esc(body.brief ?? body.summary ?? ''),\n  pushed_by_s: esc(body.pushed_by ?? body.source ?? 'manual')\n};\n\nreturn [{ json: out }];\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "校验与规范化",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "leftValue": "", "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.valid_flag }}",
+              "rightValue": "yes",
+              "operator": { "type": "string", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "IF 合法",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-180, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT count(*)::int AS dup FROM topic_sources WHERE url = '{{ $json.urls[0] }}'",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "查重",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [40, 220],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "leftValue": "", "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.dup }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "IF 重复",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [260, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO topics (topic_id, title, angle, direction, keywords, brief, pushed_by, status)\nVALUES ('{{ $('校验与规范化').first().json.topic_id }}', '{{ $('校验与规范化').first().json.title_s }}', '{{ $('校验与规范化').first().json.angle_s }}', '{{ $('校验与规范化').first().json.direction_s }}', '{{ $('校验与规范化').first().json.keywords_s }}', '{{ $('校验与规范化').first().json.brief_s }}', '{{ $('校验与规范化').first().json.pushed_by_s }}', 'received')\nRETURNING topic_id, title, status;",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "写入选题",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [480, 140],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('校验与规范化').first().json;\nconst esc = s => String(s ?? '').replace(/'/g, \"''\");\nreturn t.sources.map(s => ({ json: { topic_id: t.topic_id, url: esc(s.url), title_s: esc(s.title), content_s: esc(s.content) } }));\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "展开信源",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 140]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO topic_sources (topic_id, url, note, content) VALUES ('{{ $json.topic_id }}', '{{ $json.url }}', '{{ $json.title_s }}', '{{ $json.content_s }}') ON CONFLICT DO NOTHING RETURNING url;",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "写入信源",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [920, 140],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, topic_id: $('校验与规范化').first().json.topic_id, status: 'received', source_count: $('校验与规范化').first().json.url_count, has_content: $('校验与规范化').first().json.sources.some(s => s.content.length > 0), next: 'POST /webhook/write {topic_id} 触发 WF2 写稿' }) }}",
+        "options": { "responseCode": 202 }
+      },
+      "id": "a1000000-0000-4000-8000-000000000009",
+      "name": "响应 202",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [1140, 140]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: '参数不合法', details: $('校验与规范化').first().json.errors }) }}",
+        "options": { "responseCode": 400 }
+      },
+      "id": "a1000000-0000-4000-8000-000000000010",
+      "name": "响应 400",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [40, 460]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: '该信源已存在，疑似重复选题', url: $('校验与规范化').first().json.urls[0] }) }}",
+        "options": { "responseCode": 409 }
+      },
+      "id": "a1000000-0000-4000-8000-000000000011",
+      "name": "响应 409",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [480, 380]
+    }
+  ],
+  "connections": {
+    "Webhook 收选题": { "main": [[{ "node": "校验与规范化", "type": "main", "index": 0 }]] },
+    "校验与规范化": { "main": [[{ "node": "IF 合法", "type": "main", "index": 0 }]] },
+    "IF 合法": {
+      "main": [
+        [{ "node": "查重", "type": "main", "index": 0 }],
+        [{ "node": "响应 400", "type": "main", "index": 0 }]
+      ]
+    },
+    "查重": { "main": [[{ "node": "IF 重复", "type": "main", "index": 0 }]] },
+    "IF 重复": {
+      "main": [
+        [{ "node": "响应 409", "type": "main", "index": 0 }],
+        [{ "node": "写入选题", "type": "main", "index": 0 }]
+      ]
+    },
+    "写入选题": { "main": [[{ "node": "展开信源", "type": "main", "index": 0 }]] },
+    "展开信源": { "main": [[{ "node": "写入信源", "type": "main", "index": 0 }]] },
+    "写入信源": { "main": [[{ "node": "响应 202", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

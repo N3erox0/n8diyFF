@@ -1,0 +1,261 @@
+{
+  "name": "WF1b 飞书选题拉取",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] }
+      },
+      "id": "b1000000-0000-4000-8000-000000000001",
+      "name": "每5分钟",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT key, value FROM settings WHERE key IN ('feishu_app_id','feishu_app_secret','feishu_app_token','feishu_table_id')",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000002",
+      "name": "读飞书配置",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-700, 300],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = {};\nfor (const it of $input.all()) cfg[it.json.key] = String(it.json.value ?? '').trim();\nconst missing = ['feishu_app_id','feishu_app_secret','feishu_app_token','feishu_table_id'].filter(k => !cfg[k]);\nreturn [{ json: {\n  app_id: cfg.feishu_app_id,\n  app_secret: cfg.feishu_app_secret,\n  app_token: cfg.feishu_app_token,\n  table_id: cfg.feishu_table_id,\n  missing,\n  ready: missing.length === 0 ? 'yes' : 'no'\n} }];\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000003",
+      "name": "组装配置",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-500, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json; charset=utf-8" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ app_id: $json.app_id, app_secret: $json.app_secret }) }}",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000004",
+      "name": "取 Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-300, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://open.feishu.cn/open-apis/bitable/v1/apps/{{ $('组装配置').first().json.app_token }}/tables/{{ $('组装配置').first().json.table_id }}/records?page_size=50",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $json.tenant_access_token }}" }] },
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000005",
+      "name": "拉待处理记录",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-100, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = $input.first().json;\nif (resp.code !== 0 && resp.code !== undefined) {\n  return [{ json: { feishu_error: true, code: resp.code, msg: resp.msg } }];\n}\nconst items = (resp.data && resp.data.items) || [];\n\nconst pick = (f, ...names) => {\n  for (const n of names) {\n    const v = f?.[n];\n    if (v === undefined || v === null) continue;\n    if (typeof v === 'string') { if (v.trim()) return v.trim(); continue; }\n    if (typeof v === 'number') return String(v);\n    if (typeof v === 'object') {\n      if (Array.isArray(v)) {\n        const t = v.map(x => typeof x === 'string' ? x : (x?.text ?? x?.name ?? '')).join(',').trim();\n        if (t) return t;\n        continue;\n      }\n      if (v.link) return String(v.link).trim();\n      if (v.text) return String(v.text).trim();\n    }\n  }\n  return '';\n};\nconst esc = s => String(s ?? '').replace(/'/g, \"''\");\nconst SKIP = ['已接收','已废弃','生成中','已完成','已发布','驳回'];\n\nconst out = [];\nfor (const it of items) {\n  const f = it.fields || {};\n  const status = pick(f, '状态');\n  if (status && SKIP.includes(status)) continue;\n\n  const sources = [];\n  for (let i = 1; i <= 3; i++) {\n    const u = pick(f, `原文链接${i}`, `链接${i}`) || (i === 1 ? pick(f, '原文链接', '链接') : '');\n    if (!u) continue;\n    sources.push({\n      url: u,\n      title: pick(f, `原文标题${i}`, `标题${i}`),\n      content: pick(f, `原文正文${i}`, `正文${i}`, `原文${i}`) || (i === 1 ? pick(f, '原文正文', '正文') : '')\n    });\n  }\n\n  const title = pick(f, '标题', '选题标题');\n  const errors = [];\n  if (!title) errors.push('标题为空');\n  if (sources.length === 0) errors.push('没有原文链接');\n\n  const topicId = 'F' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);\n  const urls = sources.map(s => s.url).filter(u => /^https?:\\/\\//i.test(u));\n  if (urls.length === 0 && sources.length > 0) errors.push('原文链接格式不是 http(s)');\n\n  out.push({ json: {\n    record_id: it.record_id,\n    valid_flag: errors.length === 0 ? 'yes' : 'no',\n    errors,\n    topic_id: topicId,\n    title,\n    angle: pick(f, '角度', '切入角度'),\n    direction: pick(f, '方向', '内容方向'),\n    keywords: pick(f, '关键词'),\n    brief: pick(f, '选题理由', '说明', '备注'),\n    pushed_by: pick(f, '来源', '来源标识') || 'feishu',\n    urls,\n    url_count: urls.length,\n    sources,\n    title_s: esc(title),\n    angle_s: esc(pick(f, '角度', '切入角度')),\n    direction_s: esc(pick(f, '方向', '内容方向')),\n    keywords_s: esc(pick(f, '关键词')),\n    brief_s: esc(pick(f, '选题理由', '说明', '备注')),\n    pushed_by_s: esc(pick(f, '来源', '来源标识') || 'feishu')\n  } });\n}\n\nif (out.length === 0) return [{ json: { empty: true, pulled: items.length } }];\nreturn out;\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000006",
+      "name": "规范化",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [100, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "leftValue": "", "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "f1",
+              "leftValue": "={{ $json.valid_flag }}",
+              "rightValue": "yes",
+              "operator": { "type": "string", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000007",
+      "name": "IF 合法",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT count(*)::int AS dup FROM topic_sources WHERE url = '{{ $json.urls[0] }}'",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000008",
+      "name": "查重",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [520, 220],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "leftValue": "", "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "f2",
+              "leftValue": "={{ $json.dup }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000009",
+      "name": "IF 重复",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [740, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO topics (topic_id, title, angle, direction, keywords, brief, pushed_by, status)\nVALUES ('{{ $('IF 重复').first().json.topic_id }}', '{{ $('IF 重复').first().json.title_s }}', '{{ $('IF 重复').first().json.angle_s }}', '{{ $('IF 重复').first().json.direction_s }}', '{{ $('IF 重复').first().json.keywords_s }}', '{{ $('IF 重复').first().json.brief_s }}', '{{ $('IF 重复').first().json.pushed_by_s }}', 'received')\nRETURNING topic_id, title, status;",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000010",
+      "name": "写入选题",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [960, 120],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const t = $('IF 重复').first().json;\nconst esc = s => String(s ?? '').replace(/'/g, \"''\");\nreturn t.sources.map(s => ({ json: { topic_id: t.topic_id, url: esc(s.url), title_s: esc(s.title), content_s: esc(s.content) } }));\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000011",
+      "name": "展开信源",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1180, 120]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO topic_sources (topic_id, url, note, content) VALUES ('{{ $json.topic_id }}', '{{ $json.url }}', '{{ $json.title_s }}', '{{ $json.content_s }}') ON CONFLICT DO NOTHING RETURNING url;",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000012",
+      "name": "写入信源",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1400, 120],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = ($('规范化').all() || []).map(i => i.json).filter(j => j.valid_flag === 'yes');\nif (rows.length === 0) return [{ json: { has_records: 'no', records: [] } }];\nreturn [{ json: {\n  has_records: 'yes',\n  count: rows.length,\n  records: rows.map(r => ({ record_id: r.record_id, fields: { 状态: '已接收', 选题ID: r.topic_id } }))\n} }];\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000013",
+      "name": "汇总回写",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1620, 220]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "leftValue": "", "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "f3",
+              "leftValue": "={{ $json.has_records }}",
+              "rightValue": "yes",
+              "operator": { "type": "string", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000014",
+      "name": "IF 有记录",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1840, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://open.feishu.cn/open-apis/bitable/v1/apps/{{ $('组装配置').first().json.app_token }}/tables/{{ $('组装配置').first().json.table_id }}/records/batch_update",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $('取 Token').first().json.tenant_access_token }}" },
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ records: $json.records }) }}",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000015",
+      "name": "回写飞书",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2060, 120]
+    },
+    {
+      "parameters": {},
+      "id": "b1000000-0000-4000-8000-000000000016",
+      "name": "无新记录",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2060, 380]
+    }
+  ],
+  "connections": {
+    "每5分钟": { "main": [[{ "node": "读飞书配置", "type": "main", "index": 0 }]] },
+    "读飞书配置": { "main": [[{ "node": "组装配置", "type": "main", "index": 0 }]] },
+    "组装配置": { "main": [[{ "node": "取 Token", "type": "main", "index": 0 }]] },
+    "取 Token": { "main": [[{ "node": "拉待处理记录", "type": "main", "index": 0 }]] },
+    "拉待处理记录": { "main": [[{ "node": "规范化", "type": "main", "index": 0 }]] },
+    "规范化": { "main": [[{ "node": "IF 合法", "type": "main", "index": 0 }]] },
+    "IF 合法": { "main": [[{ "node": "查重", "type": "main", "index": 0 }], []] },
+    "查重": { "main": [[{ "node": "IF 重复", "type": "main", "index": 0 }]] },
+    "IF 重复": {
+      "main": [
+        [{ "node": "汇总回写", "type": "main", "index": 0 }],
+        [{ "node": "写入选题", "type": "main", "index": 0 }]
+      ]
+    },
+    "写入选题": { "main": [[{ "node": "展开信源", "type": "main", "index": 0 }]] },
+    "展开信源": { "main": [[{ "node": "写入信源", "type": "main", "index": 0 }]] },
+    "写入信源": { "main": [[{ "node": "汇总回写", "type": "main", "index": 0 }]] },
+    "汇总回写": { "main": [[{ "node": "IF 有记录", "type": "main", "index": 0 }]] },
+    "IF 有记录": {
+      "main": [
+        [{ "node": "回写飞书", "type": "main", "index": 0 }],
+        [{ "node": "无新记录", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" }
+}

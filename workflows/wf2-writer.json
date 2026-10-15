@@ -1,0 +1,233 @@
+{
+  "name": "WF2 写稿流水线",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "write",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000001",
+      "name": "触发写稿",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-820, 320],
+      "webhookId": "write-draft"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst b = raw.body && Object.keys(raw.body).length ? raw.body : raw;\nconst topicId = String(b.topic_id ?? b.topicId ?? b.id ?? '').trim();\nreturn [{ json: { topic_id: topicId, has_id: topicId ? 'yes' : 'no' } }];\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000015",
+      "name": "取 topicId",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-710, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT topic_id, title, angle, direction, keywords, brief FROM topics WHERE topic_id = '{{ $json.topic_id }}'",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000002",
+      "name": "取选题",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-600, 320],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT url, note AS title, content FROM topic_sources WHERE topic_id = '{{ $json.topic_id }}'",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000003",
+      "name": "取信源",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-380, 320],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const topic = $('取选题').first().json;\nconst srcs = $input.all().map(i => i.json);\nlet total = 0;\nconst parts = srcs.map((s, idx) => {\n  const c = String(s.content ?? '').trim();\n  if (c.length > 0) { total += c.length; return '【素材' + (idx + 1) + '】' + (s.title || s.url) + '\\n' + c.slice(0, 6000); }\n  return '【素材' + (idx + 1) + '】' + (s.title || s.url) + '\\n（正文缺失，仅链接：' + s.url + '）';\n});\nconst head = '选题：' + topic.title + '\\n角度：' + (topic.angle || '未指定') + '\\n方向：' + (topic.direction || '未指定') + '\\n关键词：' + (topic.keywords || '无') + '\\n补充说明：' + (topic.brief || '无');\nconst material = head + '\\n\\n' + parts.join('\\n\\n');\nreturn [{ json: {\n  topic_id: topic.topic_id,\n  title: topic.title,\n  angle: topic.angle || '',\n  direction: topic.direction || '',\n  keywords: topic.keywords || '',\n  material,\n  src_count: srcs.length,\n  chars: total,\n  enough_flag: total >= 200 ? 'yes' : 'no'\n} }];\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000004",
+      "name": "汇总原料",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 320]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "leftValue": "", "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "w1",
+              "leftValue": "={{ $json.enough_flag }}",
+              "rightValue": "yes",
+              "operator": { "type": "string", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000005",
+      "name": "IF 原文足够",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [60, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE((SELECT value FROM settings WHERE key = 'DEEPSEEK_API_KEY'), '') AS value",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000016",
+      "name": "取密钥",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [280, 380],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const m = $input.first().json;\nconst sys = '你是资深公众号主编。根据素材和给定角度产出文章提纲。只输出 JSON，不要任何解释或代码围栏。JSON 结构：{\"title_options\":[\"标题1\",\"标题2\",\"标题3\"],\"outline\":[{\"h2\":\"小节标题\",\"points\":[\"要点1\",\"要点2\"]}],\"key_facts\":[\"需要核对的硬事实\"]}';\nconst user = '角度：' + m.angle + '\\n方向：' + m.direction + '\\n关键词：' + m.keywords + '\\n\\n素材：\\n' + m.material;\nconst key = $('取密钥').first().json.value || '';\nreturn [{ json: { api_key: key, request: { model: 'deepseek-flash', temperature: 0.6, messages: [ { role: 'system', content: sys }, { role: 'user', content: user } ] } } }];\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000006",
+      "name": "组装提纲请求",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [280, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }, { "name": "Authorization", "value": "={{ 'Bearer ' + $json.api_key }}" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.request }}",
+        "options": { "timeout": 180000 }
+      },
+      "id": "b1000000-0000-4000-8000-000000000007",
+      "name": "调用DeepSeek-提纲",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = $input.first().json;\nconst raw = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) ? resp.choices[0].message.content : '';\nlet outline = raw;\ntry { const clean = raw.replace(/```json/g, '').replace(/```/g, '').trim(); const o = JSON.parse(clean); outline = JSON.stringify(o); } catch (e) { outline = raw; }\nconst m = $('汇总原料').first().json;\nreturn [{ json: { topic_id: m.topic_id, outline_raw: raw, outline_json: outline, material: m.material } }];\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000008",
+      "name": "解析提纲",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst sys = '你是公众号资深作者。按提纲写成一篇可直接发布的成品稿。要求：结构完整、有独立观点、绝不编造数据（素材没有的信息宁可不写）、语言专业克制、不使用 emoji、字数 1500-2500。只输出 Markdown 正文，不要任何前缀说明。';\nconst user = '提纲：\\n' + d.outline_json + '\\n\\n素材：\\n' + d.material;\nconst key = $('取密钥').first().json.value || '';\nreturn [{ json: { api_key: key, request: { model: 'deepseek-flash', temperature: 0.8, messages: [ { role: 'system', content: sys }, { role: 'user', content: user } ] } } }];\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000009",
+      "name": "组装成文请求",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [940, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }, { "name": "Authorization", "value": "={{ 'Bearer ' + $json.api_key }}" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.request }}",
+        "options": { "timeout": 300000 }
+      },
+      "id": "b1000000-0000-4000-8000-000000000010",
+      "name": "调用DeepSeek-成文",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1160, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = $input.first().json;\nconst md = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) ? resp.choices[0].message.content : '';\nconst esc = s => String(s ?? '').replace(/'/g, \"''\");\nreturn [{ json: {\n  topic_id: $('汇总原料').first().json.topic_id,\n  outline: $('解析提纲').first().json.outline_json,\n  body_md: md,\n  outline_s: esc($('解析提纲').first().json.outline_json),\n  body_md_s: esc(md),\n  chars: md.length\n} }];\n"
+      },
+      "id": "b1000000-0000-4000-8000-000000000011",
+      "name": "整理成稿",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1380, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO drafts (topic_id, outline, body_md, status) VALUES ('{{ $json.topic_id }}', '{{ $json.outline_s }}', '{{ $json.body_md_s }}', 'drafting') RETURNING id, topic_id, status;",
+        "options": {}
+      },
+      "id": "b1000000-0000-4000-8000-000000000012",
+      "name": "写入成稿",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1600, 220],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, topic_id: $('整理成稿').first().json.topic_id, chars: $('整理成稿').first().json.chars, draft_status: 'drafting', next: 'WF3 事实核查与排版' }) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "b1000000-0000-4000-8000-000000000013",
+      "name": "响应 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [1820, 220]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: '原文不足（少于 200 字），无法写稿', hint: '推送时请在 sources[].content 带上原文正文，服务器抓不了海外站点', topic_id: $('汇总原料').first().json.topic_id, chars: $('汇总原料').first().json.chars }) }}",
+        "options": { "responseCode": 422 }
+      },
+      "id": "b1000000-0000-4000-8000-000000000014",
+      "name": "响应 422",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [280, 480]
+    }
+  ],
+  "connections": {
+    "触发写稿": { "main": [[{ "node": "取 topicId", "type": "main", "index": 0 }]] },
+    "取 topicId": { "main": [[{ "node": "取选题", "type": "main", "index": 0 }]] },
+    "取选题": { "main": [[{ "node": "取信源", "type": "main", "index": 0 }]] },
+    "取信源": { "main": [[{ "node": "汇总原料", "type": "main", "index": 0 }]] },
+    "汇总原料": { "main": [[{ "node": "IF 原文足够", "type": "main", "index": 0 }]] },
+    "IF 原文足够": {
+      "main": [
+        [{ "node": "取密钥", "type": "main", "index": 0 }],
+        [{ "node": "响应 422", "type": "main", "index": 0 }]
+      ]
+    },
+    "取密钥": { "main": [[{ "node": "组装提纲请求", "type": "main", "index": 0 }]] },
+    "组装提纲请求": { "main": [[{ "node": "调用DeepSeek-提纲", "type": "main", "index": 0 }]] },
+    "调用DeepSeek-提纲": { "main": [[{ "node": "解析提纲", "type": "main", "index": 0 }]] },
+    "解析提纲": { "main": [[{ "node": "组装成文请求", "type": "main", "index": 0 }]] },
+    "组装成文请求": { "main": [[{ "node": "调用DeepSeek-成文", "type": "main", "index": 0 }]] },
+    "调用DeepSeek-成文": { "main": [[{ "node": "整理成稿", "type": "main", "index": 0 }]] },
+    "整理成稿": { "main": [[{ "node": "写入成稿", "type": "main", "index": 0 }]] },
+    "写入成稿": { "main": [[{ "node": "响应 200", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

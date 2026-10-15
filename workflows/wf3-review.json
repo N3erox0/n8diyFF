@@ -1,0 +1,210 @@
+{
+  "name": "WF3 核查-排版-审核",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "review",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000001",
+      "name": "触发核查",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-900, 320],
+      "webhookId": "review-draft"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst b = raw.body && Object.keys(raw.body).length ? raw.body : raw;\nconst topicId = String(b.topic_id ?? b.topicId ?? '').trim();\nconst draftId = String(b.draft_id ?? b.draftId ?? '').trim();\nconst esc = s => String(s).replace(/'/g, \"''\");\nconst sub = draftId\n  ? 'SELECT id FROM drafts WHERE id = ' + draftId\n  : 'SELECT id FROM drafts WHERE topic_id = \\'' + esc(topicId) + '\\' ORDER BY id DESC LIMIT 1';\nconst sql = 'SELECT d.id, d.topic_id, t.title, d.outline, d.body_md FROM (SELECT 1) z LEFT JOIN drafts d ON d.id = (' + sub + ') LEFT JOIN topics t ON t.topic_id = d.topic_id';\nreturn [{ json: { topic_id: topicId, draft_id: draftId, sql } }];\n"
+      },
+      "id": "c1000000-0000-4000-8000-000000000002",
+      "name": "构造查询",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-780, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000003",
+      "name": "取成稿",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-640, 320],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "leftValue": "", "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ '' + ($json.id ?? '') }}",
+              "operator": { "type": "string", "operation": "notEmpty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000004",
+      "name": "IF 有成稿",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-500, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE((SELECT value FROM settings WHERE key = 'ZHIPU_API_KEY'), '') AS value, COALESCE((SELECT value FROM settings WHERE key = 'ZHIPU_MODEL'), 'glm-4-flash') AS model",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000014",
+      "name": "取密钥",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-340, 480],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT url, note AS title, content FROM topic_sources WHERE topic_id = '{{ $('取成稿').first().json.topic_id }}'",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000005",
+      "name": "取信源",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [-340, 320],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $('取成稿').first().json;\nconst srcs = $input.all().map(i => i.json);\nconst mat = srcs.map((s, i) => '【原文' + (i + 1) + '】' + (s.title || s.url) + '\\n' + String(s.content ?? '').slice(0, 8000)).join('\\n\\n');\nconst sys = '你是事实核查编辑。对照给出的原文，逐条检查成稿中的事实性表述（数字、时间、机构、因果关系、绝对化断言）。只输出 JSON，不要解释和代码围栏。结构：{\"issues\":[{\"claim\":\"成稿原句\",\"verdict\":\"supported|unsupported|contradicted\",\"evidence\":\"原文依据\",\"suggestion\":\"修改建议\"}],\"risk_level\":\"low|medium|high\",\"summary\":\"一句话结论\"}。若无可疑处，issues 为空数组。最多列 8 条，每条 claim / evidence / suggestion 控制在 60 字以内；必须输出完整闭合的 JSON，不要截断。';\nconst user = '成稿正文：\\n' + String(d.body_md ?? '').slice(0, 12000) + '\\n\\n参考原文：\\n' + mat;\nconst key = $('取密钥').first().json.value || '';\nconst model = $('取密钥').first().json.model || 'glm-4-flash';\nreturn [{ json: { api_key: key, model, request: { model, temperature: 0.2, max_tokens: 4096, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }] } } }];\n"
+      },
+      "id": "c1000000-0000-4000-8000-000000000006",
+      "name": "组装核查请求",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }, { "name": "Authorization", "value": "={{ 'Bearer ' + $json.api_key }}" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.request }}",
+        "options": { "timeout": 300000 }
+      },
+      "id": "c1000000-0000-4000-8000-000000000007",
+      "name": "调用智谱-核查",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [40, 320],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 8000
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = $input.first().json;\nconst d = $('取成稿').first().json;\nconst raw = (resp && resp.choices && resp.choices[0] && resp.choices[0].message) ? String(resp.choices[0].message.content) : '';\nfunction parseObj(text) {\n  const s = String(text).replace(/```json/g, '').replace(/```/g, '').trim();\n  try { return JSON.parse(s); } catch (e) {}\n  const a = s.indexOf('{');\n  const b = s.lastIndexOf('}');\n  if (a >= 0 && b > a) {\n    try { return JSON.parse(s.slice(a, b + 1)); } catch (e) {}\n    // 输出被截断时，逐个补全未闭合的结构再试\n    let cut = s.slice(a, b + 1);\n    for (let n = 0; n < 6; n++) {\n      cut = cut.replace(/,\\s*$/, '') + '}';\n      try { return JSON.parse(cut); } catch (e) {}\n    }\n  }\n  return null;\n}\nlet obj = { issues: [], risk_level: 'unknown', summary: '核查未返回结果（Key 未配置或调用失败）' };\nif (raw) {\n  const p = parseObj(raw);\n  if (p && typeof p === 'object') {\n    obj = { issues: Array.isArray(p.issues) ? p.issues : [], risk_level: p.risk_level || 'unknown', summary: p.summary || '' };\n  } else {\n    obj = { issues: [], risk_level: 'unknown', summary: '核查返回无法解析：' + raw.slice(0, 200) };\n  }\n}\nreturn [{ json: { topic_id: d.topic_id, draft_id: d.id, title: d.title || '', body_md: d.body_md || '', facts: obj, risk_level: obj.risk_level, issue_count: obj.issues.length } }];\n"
+      },
+      "id": "c1000000-0000-4000-8000-000000000008",
+      "name": "解析核查",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst inline = s => { let t = esc(s); t = t.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>'); t = t.replace(/`([^`]+)`/g, '<code style=\"background:#f5f5f5;padding:2px 4px;border-radius:3px\">$1</code>'); return t; };\nconst P = 'margin:0 0 18px;line-height:1.75;font-size:16px;color:#333';\nfunction md2html(md) {\n  const lines = String(md ?? '').split('\\n');\n  const out = []; let inList = false;\n  for (let rawLine of lines) {\n    const l = rawLine.trim();\n    if (!l) { if (inList) { out.push('</ul>'); inList = false; } continue; }\n    const h = l.match(/^(#{1,4})\\s+(.*)$/);\n    if (h) {\n      if (inList) { out.push('</ul>'); inList = false; }\n      const lv = Math.min(h[1].length, 4);\n      const size = [24, 20, 18, 16][lv - 1];\n      out.push('<h' + lv + ' style=\"margin:28px 0 14px;font-size:' + size + 'px;line-height:1.4;color:#1a1a1a;font-weight:600\">' + inline(h[2]) + '</h' + lv + '>');\n      continue;\n    }\n    if (/^[-*]\\s+/.test(l)) {\n      if (!inList) { out.push('<ul style=\"margin:0 0 18px;padding-left:22px\">'); inList = true; }\n      out.push('<li style=\"' + P + '\">' + inline(l.replace(/^[-*]\\s+/, '')) + '</li>');\n      continue;\n    }\n    if (inList) { out.push('</ul>'); inList = false; }\n    if (/^>\\s?/.test(l)) {\n      out.push('<blockquote style=\"margin:0 0 18px;padding:10px 14px;background:#f7f7f7;border-left:3px solid #ddd;color:#555;font-size:15px\">' + inline(l.replace(/^>\\s?/, '')) + '</blockquote>');\n      continue;\n    }\n    out.push('<p style=\"' + P + '\">' + inline(l) + '</p>');\n  }\n  if (inList) out.push('</ul>');\n  return out.join('\\n');\n}\nconst d = $input.first().json;\nconst html = md2html(d.body_md);\nconst issues = d.facts.issues || [];\nconst hard = issues.filter(i => i.verdict === 'contradicted' || i.verdict === 'unsupported').length;\nlet decision = 'approved', draftStatus = 'approved';\nif (d.risk_level === 'unknown' || d.risk_level === 'high' || hard > 0) { decision = 'needs_review'; draftStatus = 'review'; }\nconst sq = s => String(s ?? '').replace(/'/g, \"''\");\nreturn [{ json: {\n  topic_id: d.topic_id, draft_id: d.draft_id, title: d.title,\n  body_md_s: sq(d.body_md), body_html_s: sq(html), title_s: sq(d.title),\n  facts_s: sq(JSON.stringify(d.facts)),\n  risk_s: sq(JSON.stringify({ level: d.risk_level, hard_issues: hard, issues })),\n  decision, draft_status: draftStatus,\n  html_len: html.length, issue_count: issues.length, hard_issues: hard,\n  summary: d.facts.summary || ''\n} }];\n"
+      },
+      "id": "c1000000-0000-4000-8000-000000000009",
+      "name": "排版与决策",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE drafts SET facts = '{{ $json.facts_s }}'::jsonb, risk_flags = '{{ $json.risk_s }}'::jsonb, body_html = '{{ $json.body_html_s }}', status = '{{ $json.draft_status }}' WHERE id = {{ $json.draft_id }} RETURNING id, status;",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000010",
+      "name": "更新成稿",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [700, 320],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO finals (topic_id, draft_id, title, body_md, body_html, facts, risk_flags, decision) VALUES ('{{ $('排版与决策').first().json.topic_id }}', {{ $('排版与决策').first().json.draft_id }}, '{{ $('排版与决策').first().json.title_s }}', '{{ $('排版与决策').first().json.body_md_s }}', '{{ $('排版与决策').first().json.body_html_s }}', '{{ $('排版与决策').first().json.facts_s }}'::jsonb, '{{ $('排版与决策').first().json.risk_s }}'::jsonb, '{{ $('排版与决策').first().json.decision }}') RETURNING id, decision;",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000011",
+      "name": "写入成品",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [920, 320],
+      "credentials": { "postgres": { "id": "__PG_CRED_ID__", "name": "Postgres n8n" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, topic_id: $('排版与决策').first().json.topic_id, decision: $('排版与决策').first().json.decision, issue_count: $('排版与决策').first().json.issue_count, hard_issues: $('排版与决策').first().json.hard_issues, html_len: $('排版与决策').first().json.html_len, summary: $('排版与决策').first().json.summary, final: $('写入成品').first().json }) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "c1000000-0000-4000-8000-000000000012",
+      "name": "响应 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [1140, 320]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: '找不到成稿', hint: '先跑 WF2 生成草稿，或检查 topic_id 是否正确', topic_id: $('构造查询').first().json.topic_id }) }}",
+        "options": { "responseCode": 404 }
+      },
+      "id": "c1000000-0000-4000-8000-000000000013",
+      "name": "响应 404",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [-340, 500]
+    }
+  ],
+  "connections": {
+    "触发核查": { "main": [[{ "node": "构造查询", "type": "main", "index": 0 }]] },
+    "构造查询": { "main": [[{ "node": "取成稿", "type": "main", "index": 0 }]] },
+    "取成稿": { "main": [[{ "node": "IF 有成稿", "type": "main", "index": 0 }]] },
+    "IF 有成稿": {
+      "main": [
+        [{ "node": "取密钥", "type": "main", "index": 0 }],
+        [{ "node": "响应 404", "type": "main", "index": 0 }]
+      ]
+    },
+    "取密钥": { "main": [[{ "node": "取信源", "type": "main", "index": 0 }]] },
+    "取信源": { "main": [[{ "node": "组装核查请求", "type": "main", "index": 0 }]] },
+    "组装核查请求": { "main": [[{ "node": "调用智谱-核查", "type": "main", "index": 0 }]] },
+    "调用智谱-核查": { "main": [[{ "node": "解析核查", "type": "main", "index": 0 }]] },
+    "解析核查": { "main": [[{ "node": "排版与决策", "type": "main", "index": 0 }]] },
+    "排版与决策": { "main": [[{ "node": "更新成稿", "type": "main", "index": 0 }]] },
+    "更新成稿": { "main": [[{ "node": "写入成品", "type": "main", "index": 0 }]] },
+    "写入成品": { "main": [[{ "node": "响应 200", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

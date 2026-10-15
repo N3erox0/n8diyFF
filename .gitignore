@@ -1,0 +1,12 @@
+# 密钥与本机状态（绝不入库）
+.env
+.owner_password
+.*_id
+*.log
+
+# 运行期数据
+out/
+n8n_data/
+postgres_data/
+__pycache__/
+.DS_Store
